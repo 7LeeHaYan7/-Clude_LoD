@@ -207,6 +207,20 @@ def write_slope_intercept_formulas(wb: openpyxl.Workbook, logs: list[LogRow]):
                             status="수식입력", message=f"상수=INTERCEPT({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"))
 
 
+def check_all_rows_valid(src: SourceWorkbook) -> tuple[bool, dict[int, str]]:
+    """B18~B21을 모두 확인한다. 넷 다 'Valid'여야 이 폴더 전체를 사용할 수 있다.
+    하나라도 Invalid(또는 그 외 값)면 그 폴더는 모든 시트에서 통째로 제외된다."""
+    statuses: dict[int, str] = {}
+    all_valid = True
+    for row, _ in EXTRACTION_RULES:
+        b_val = src.cell("B", row)
+        status = str(b_val).strip() if b_val is not None else ""
+        statuses[row] = status or "(빈 값)"
+        if status.lower() != "valid":
+            all_valid = False
+    return all_valid, statuses
+
+
 def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
     logs: list[LogRow] = []
 
@@ -252,44 +266,40 @@ def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
                 logs.append(LogRow(top, sub_name, status="오류", message=f"파일 열기 실패: {e}"))
                 continue
 
+            all_valid, statuses = check_all_rows_valid(src)
+
+            if not all_valid:
+                invalid_desc = ", ".join(f"B{r}={s}" for r, s in statuses.items() if s.lower() != "valid")
+                logs.append(LogRow(
+                    top, sub_name, status="건너뜀(폴더 전체)",
+                    message=f"{invalid_desc} - 하나라도 Invalid라 이 폴더는 모든 탭에서 {target_row}행 전체 제외",
+                ))
+                src.close()
+                continue
+
             for row, extractions in EXTRACTION_RULES:
-                b_val = src.cell("B", row)
-                status = str(b_val).strip() if b_val is not None else ""
+                for col, pathogen in extractions:
+                    raw_val = src.cell(col, row)
+                    value = clean_value(raw_val)
+                    target_sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
 
-                if status.lower() == "valid":
-                    for col, pathogen in extractions:
-                        raw_val = src.cell(col, row)
-                        value = clean_value(raw_val)
-                        target_sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
-
-                        if target_sheet_name not in wb.sheetnames:
-                            logs.append(LogRow(
-                                top, sub_name, check_row=f"B{row}", judgement="Valid",
-                                source_cell=f"{col}{row}", raw_value=raw_val,
-                                status="오류", message=f"타겟 시트 '{target_sheet_name}' 없음",
-                            ))
-                            continue
-
-                        ws = wb[target_sheet_name]
-                        target_cell = f"{ct_col}{target_row}"
-                        ws[target_cell] = value
-
+                    if target_sheet_name not in wb.sheetnames:
                         logs.append(LogRow(
                             top, sub_name, check_row=f"B{row}", judgement="Valid",
-                            source_cell=f"{col}{row}", raw_value=raw_val, written_value=value,
-                            target_sheet=target_sheet_name, target_cell=target_cell,
-                            status="기록완료",
+                            source_cell=f"{col}{row}", raw_value=raw_val,
+                            status="오류", message=f"타겟 시트 '{target_sheet_name}' 없음",
                         ))
+                        continue
 
-                elif status.lower() == "invalid":
+                    ws = wb[target_sheet_name]
+                    target_cell = f"{ct_col}{target_row}"
+                    ws[target_cell] = value
+
                     logs.append(LogRow(
-                        top, sub_name, check_row=f"B{row}", judgement="Invalid",
-                        status="건너뜀",
-                    ))
-                else:
-                    logs.append(LogRow(
-                        top, sub_name, check_row=f"B{row}", judgement=status or "(빈 값)",
-                        status="경고", message="Valid/Invalid가 아닌 값 - 건너뜀",
+                        top, sub_name, check_row=f"B{row}", judgement="Valid",
+                        source_cell=f"{col}{row}", raw_value=raw_val, written_value=value,
+                        target_sheet=target_sheet_name, target_cell=target_cell,
+                        status="기록완료",
                     ))
 
             src.close()
@@ -342,57 +352,53 @@ def update_with_retest(existing_path: Path, retest_root: Path, out_path: Path) -
                 logs.append(LogRow(top, sub_name, status="오류", message=f"파일 열기 실패: {e}"))
                 continue
 
+            all_valid, statuses = check_all_rows_valid(src)
+
+            if not all_valid:
+                invalid_desc = ", ".join(f"B{r}={s}" for r, s in statuses.items() if s.lower() != "valid")
+                logs.append(LogRow(
+                    top, sub_name, status="건너뜀(폴더 전체, 기존값 유지)",
+                    message=f"{invalid_desc} - 이 재측정 폴더는 모든 탭에서 사용하지 않고 기존값 유지",
+                ))
+                src.close()
+                continue
+
             for row, extractions in EXTRACTION_RULES:
-                b_val = src.cell("B", row)
-                status = str(b_val).strip() if b_val is not None else ""
+                for col, pathogen in extractions:
+                    raw_val = src.cell(col, row)
+                    value = clean_value(raw_val)
+                    target_sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
 
-                if status.lower() == "valid":
-                    for col, pathogen in extractions:
-                        raw_val = src.cell(col, row)
-                        value = clean_value(raw_val)
-                        target_sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
+                    if target_sheet_name not in wb.sheetnames:
+                        logs.append(LogRow(
+                            top, sub_name, check_row=f"B{row}", judgement="Valid",
+                            source_cell=f"{col}{row}", raw_value=raw_val,
+                            status="오류", message=f"타겟 시트 '{target_sheet_name}' 없음",
+                        ))
+                        continue
 
-                        if target_sheet_name not in wb.sheetnames:
-                            logs.append(LogRow(
-                                top, sub_name, check_row=f"B{row}", judgement="Valid",
-                                source_cell=f"{col}{row}", raw_value=raw_val,
-                                status="오류", message=f"타겟 시트 '{target_sheet_name}' 없음",
-                            ))
-                            continue
+                    ws = wb[target_sheet_name]
+                    target_cell = f"{ct_col}{target_row}"
+                    old_value = ws[target_cell].value
 
-                        ws = wb[target_sheet_name]
-                        target_cell = f"{ct_col}{target_row}"
-                        old_value = ws[target_cell].value
-
-                        if old_value == value:
-                            logs.append(LogRow(
-                                top, sub_name, check_row=f"B{row}", judgement="Valid",
-                                source_cell=f"{col}{row}", raw_value=raw_val,
-                                previous_value=old_value, written_value=value,
-                                target_sheet=target_sheet_name, target_cell=target_cell,
-                                status="동일값-변경없음",
-                            ))
-                        else:
-                            ws[target_cell] = value
-                            ws[target_cell].fill = RETEST_FILL
-                            logs.append(LogRow(
-                                top, sub_name, check_row=f"B{row}", judgement="Valid",
-                                source_cell=f"{col}{row}", raw_value=raw_val,
-                                previous_value=old_value, written_value=value,
-                                target_sheet=target_sheet_name, target_cell=target_cell,
-                                status="변경됨(노란색 표시)",
-                            ))
-
-                elif status.lower() == "invalid":
-                    logs.append(LogRow(
-                        top, sub_name, check_row=f"B{row}", judgement="Invalid",
-                        status="건너뜀(기존값 유지)",
-                    ))
-                else:
-                    logs.append(LogRow(
-                        top, sub_name, check_row=f"B{row}", judgement=status or "(빈 값)",
-                        status="경고", message="Valid/Invalid가 아닌 값 - 건너뜀(기존값 유지)",
-                    ))
+                    if old_value == value:
+                        logs.append(LogRow(
+                            top, sub_name, check_row=f"B{row}", judgement="Valid",
+                            source_cell=f"{col}{row}", raw_value=raw_val,
+                            previous_value=old_value, written_value=value,
+                            target_sheet=target_sheet_name, target_cell=target_cell,
+                            status="동일값-변경없음",
+                        ))
+                    else:
+                        ws[target_cell] = value
+                        ws[target_cell].fill = RETEST_FILL
+                        logs.append(LogRow(
+                            top, sub_name, check_row=f"B{row}", judgement="Valid",
+                            source_cell=f"{col}{row}", raw_value=raw_val,
+                            previous_value=old_value, written_value=value,
+                            target_sheet=target_sheet_name, target_cell=target_cell,
+                            status="변경됨(노란색 표시)",
+                        ))
 
             src.close()
 
