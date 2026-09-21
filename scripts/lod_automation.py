@@ -4,7 +4,7 @@ LoD 실험 데이터 자동 집계 스크립트
 폴더 구조:
   <ROOT>/5000cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/1670cp/1_1 .. 16_1/*FinalResult*.xls(x)
-  <ROOT>/556p/1_1 .. 16_1/*FinalResult*.xls(x)
+  <ROOT>/556cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/185cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/62cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/21cp/1_1 .. 16_1/*FinalResult*.xls(x)
@@ -35,13 +35,13 @@ except ImportError:  # pragma: no cover
     xlrd = None
 
 
-TOP_FOLDERS_ORDER = ["5000cp", "1670cp", "556p", "185cp", "62cp", "21cp"]
+TOP_FOLDERS_ORDER = ["5000cp", "1670cp", "556cp", "185cp", "62cp", "21cp"]
 
 # 상위 폴더 -> 타겟 시트에서 Ct 값을 쓸 열
 CT_COLUMN = {
     "5000cp": "D",
     "1670cp": "F",
-    "556p": "H",
+    "556cp": "H",
     "185cp": "J",
     "62cp": "L",
     "21cp": "N",
