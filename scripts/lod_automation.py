@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from openpyxl.styles import PatternFill
 
 try:
     import xlrd
@@ -59,8 +60,18 @@ EXTRACTION_RULES: list[tuple[int, list[tuple[str, str]]]] = [
 ]
 
 TARGET_SHEET_PREFIX = "260909_"
+PATHOGENS = ["CPA", "CPE", "Giardia", "CPV2", "Campylobacter", "Salmonella", "CECoV"]
+
+# 기울기/상수: 각 병원체 시트의 표준곡선(Log(농도) vs 평균 Ct) 선형회귀
+SLOPE_CELL = "AB18"
+INTERCEPT_CELL = "AB19"
+REGRESSION_Y_RANGE = "R6:R11"  # 평균 Ct
+REGRESSION_X_RANGE = "Q6:Q11"  # Log(농도)
+
+RETEST_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
 SUBFOLDER_RE = re.compile(r"^(\d+)_1$")
+TRAILING_NUMBER_RE = re.compile(r"(\d+)_1$")
 
 
 def col_letter_to_index(letter: str) -> int:
@@ -126,6 +137,7 @@ class LogRow:
     written_value: object = ""
     target_sheet: str = ""
     target_cell: str = ""
+    previous_value: object = ""
     status: str = ""
     message: str = ""
 
@@ -137,6 +149,7 @@ class LogRow:
             "판정": self.judgement,
             "소스셀": self.source_cell,
             "원본값": self.raw_value,
+            "기존기록값": self.previous_value,
             "기록값": self.written_value,
             "타겟시트": self.target_sheet,
             "타겟셀": self.target_cell,
@@ -169,6 +182,29 @@ def find_subfolders(top_dir: Path, n: int) -> list[Path]:
             if boundary_idx == 0 or not d.name[boundary_idx - 1].isdigit():
                 matches.append(d)
     return matches
+
+
+def parse_folder_number(name: str) -> int | None:
+    """폴더명 끝이 'N_1'이면 N을 반환. 아니면 None."""
+    m = TRAILING_NUMBER_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
+def write_slope_intercept_formulas(wb: openpyxl.Workbook, logs: list[LogRow]):
+    """각 병원체 시트에 표준곡선 기울기(AB18)/상수(AB19) 수식을 입력한다."""
+    for pathogen in PATHOGENS:
+        sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
+        if sheet_name not in wb.sheetnames:
+            logs.append(LogRow("", "", target_sheet=sheet_name, status="오류",
+                                message="기울기/상수 입력 대상 시트 없음"))
+            continue
+        ws = wb[sheet_name]
+        ws[SLOPE_CELL] = f"=SLOPE({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"
+        ws[INTERCEPT_CELL] = f"=INTERCEPT({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"
+        logs.append(LogRow("", "", target_sheet=sheet_name, target_cell=SLOPE_CELL,
+                            status="수식입력", message=f"기울기=SLOPE({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"))
+        logs.append(LogRow("", "", target_sheet=sheet_name, target_cell=INTERCEPT_CELL,
+                            status="수식입력", message=f"상수=INTERCEPT({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"))
 
 
 def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
@@ -258,6 +294,110 @@ def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
 
             src.close()
 
+    write_slope_intercept_formulas(wb, logs)
+
+    wb.save(out_path)
+    return logs
+
+
+def update_with_retest(existing_path: Path, retest_root: Path, out_path: Path) -> list[LogRow]:
+    """재측정 폴더(existing_path와 동일한 상위cp/N_1 구조, 재측정된 항목만 존재)의 값으로
+    기존 결과 파일을 업데이트한다. 실제로 값이 바뀐 셀만 덮어쓰고 노란색으로 표시한다."""
+    logs: list[LogRow] = []
+
+    wb = openpyxl.load_workbook(existing_path)
+
+    for top_dir in sorted(p for p in retest_root.iterdir() if p.is_dir()):
+        top = top_dir.name
+        if top not in CT_COLUMN:
+            logs.append(LogRow(top, "", status="오류",
+                                message="알 수 없는 상위 폴더명 (5000cp/1670cp/556cp/185cp/62cp/21cp 중 하나여야 함)"))
+            continue
+        ct_col = CT_COLUMN[top]
+
+        for sub_dir in sorted(p for p in top_dir.iterdir() if p.is_dir()):
+            n = parse_folder_number(sub_dir.name)
+            if n is None or not (1 <= n <= SUBFOLDER_COUNT):
+                logs.append(LogRow(top, sub_dir.name, status="오류",
+                                    message="폴더명에서 번호(N_1)를 인식할 수 없음"))
+                continue
+
+            sub_name = f"{n}_1"
+            target_row = FIRST_DATA_ROW + (n - 1)
+
+            matches = find_final_result_files(sub_dir)
+            if len(matches) == 0:
+                logs.append(LogRow(top, sub_name, status="오류", message="FinalResult 파일을 찾을 수 없음"))
+                continue
+            if len(matches) > 1:
+                names = ", ".join(m.name for m in matches)
+                logs.append(LogRow(top, sub_name, status="오류",
+                                    message=f"FinalResult 파일이 {len(matches)}개 발견됨: {names}"))
+                continue
+
+            src_path = matches[0]
+            try:
+                src = SourceWorkbook(src_path)
+            except Exception as e:
+                logs.append(LogRow(top, sub_name, status="오류", message=f"파일 열기 실패: {e}"))
+                continue
+
+            for row, extractions in EXTRACTION_RULES:
+                b_val = src.cell("B", row)
+                status = str(b_val).strip() if b_val is not None else ""
+
+                if status.lower() == "valid":
+                    for col, pathogen in extractions:
+                        raw_val = src.cell(col, row)
+                        value = clean_value(raw_val)
+                        target_sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
+
+                        if target_sheet_name not in wb.sheetnames:
+                            logs.append(LogRow(
+                                top, sub_name, check_row=f"B{row}", judgement="Valid",
+                                source_cell=f"{col}{row}", raw_value=raw_val,
+                                status="오류", message=f"타겟 시트 '{target_sheet_name}' 없음",
+                            ))
+                            continue
+
+                        ws = wb[target_sheet_name]
+                        target_cell = f"{ct_col}{target_row}"
+                        old_value = ws[target_cell].value
+
+                        if old_value == value:
+                            logs.append(LogRow(
+                                top, sub_name, check_row=f"B{row}", judgement="Valid",
+                                source_cell=f"{col}{row}", raw_value=raw_val,
+                                previous_value=old_value, written_value=value,
+                                target_sheet=target_sheet_name, target_cell=target_cell,
+                                status="동일값-변경없음",
+                            ))
+                        else:
+                            ws[target_cell] = value
+                            ws[target_cell].fill = RETEST_FILL
+                            logs.append(LogRow(
+                                top, sub_name, check_row=f"B{row}", judgement="Valid",
+                                source_cell=f"{col}{row}", raw_value=raw_val,
+                                previous_value=old_value, written_value=value,
+                                target_sheet=target_sheet_name, target_cell=target_cell,
+                                status="변경됨(노란색 표시)",
+                            ))
+
+                elif status.lower() == "invalid":
+                    logs.append(LogRow(
+                        top, sub_name, check_row=f"B{row}", judgement="Invalid",
+                        status="건너뜀(기존값 유지)",
+                    ))
+                else:
+                    logs.append(LogRow(
+                        top, sub_name, check_row=f"B{row}", judgement=status or "(빈 값)",
+                        status="경고", message="Valid/Invalid가 아닌 값 - 건너뜀(기존값 유지)",
+                    ))
+
+            src.close()
+
+    write_slope_intercept_formulas(wb, logs)
+
     wb.save(out_path)
     return logs
 
@@ -268,7 +408,7 @@ def write_log(logs: list[LogRow], log_path: Path):
     ws.title = "처리내역"
 
     headers = ["상위폴더", "하위폴더", "검사행", "판정", "소스셀", "원본값",
-               "기록값", "타겟시트", "타겟셀", "상태", "메시지"]
+               "기존기록값", "기록값", "타겟시트", "타겟셀", "상태", "메시지"]
     ws.append(headers)
     for log in logs:
         d = log.as_dict()
@@ -282,14 +422,20 @@ def write_log(logs: list[LogRow], log_path: Path):
     summary = log_wb.create_sheet("요약")
     total = len(logs)
     written = sum(1 for l in logs if l.status == "기록완료")
-    skipped = sum(1 for l in logs if l.status == "건너뜀")
+    changed = sum(1 for l in logs if l.status == "변경됨(노란색 표시)")
+    unchanged = sum(1 for l in logs if l.status == "동일값-변경없음")
+    skipped = sum(1 for l in logs if l.status.startswith("건너뜀"))
+    formulas = sum(1 for l in logs if l.status == "수식입력")
     errors = [l for l in logs if l.status == "오류"]
     warnings = [l for l in logs if l.status == "경고"]
 
     summary.append(["항목", "값"])
     summary.append(["총 로그 행 수", total])
-    summary.append(["기록 완료", written])
-    summary.append(["Invalid로 건너뜀", skipped])
+    summary.append(["기록 완료(신규 생성)", written])
+    summary.append(["변경됨(재측정, 노란색 표시)", changed])
+    summary.append(["동일값-변경없음(재측정)", unchanged])
+    summary.append(["Invalid/이상값으로 건너뜀", skipped])
+    summary.append(["기울기/상수 수식 입력", formulas])
     summary.append(["오류 건수", len(errors)])
     summary.append(["경고 건수", len(warnings)])
     summary.append([])
@@ -304,14 +450,32 @@ def write_log(logs: list[LogRow], log_path: Path):
     log_wb.save(log_path)
 
 
-def main():
-    parser = argparse.ArgumentParser(description="LoD FinalResult 데이터를 타겟 엑셀로 자동 집계")
-    parser.add_argument("--root", required=True, help="1st 폴더 경로 (상위 폴더 5000cp 등이 들어있는 경로)")
-    parser.add_argument("--template", required=True, help="타겟 LoD 템플릿 xlsx 경로 (읽기 전용, 수정되지 않음)")
-    parser.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 템플릿명_결과_타임스탬프.xlsx)")
-    parser.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
-    args = parser.parse_args()
+def resolve_out_and_log_paths(base_path: Path, out_arg: str | None, log_arg: str | None,
+                               suffix_label: str) -> tuple[Path, Path]:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = Path(out_arg) if out_arg else base_path.with_name(
+        f"{base_path.stem}_{suffix_label}_{timestamp}{base_path.suffix}")
+    log_path = Path(log_arg) if log_arg else out_path.with_name(f"{out_path.stem}_로그.xlsx")
+    return out_path, log_path
 
+
+def print_summary(logs: list[LogRow], out_path: Path, log_path: Path):
+    written = sum(1 for l in logs if l.status == "기록완료")
+    changed = sum(1 for l in logs if l.status == "변경됨(노란색 표시)")
+    unchanged = sum(1 for l in logs if l.status == "동일값-변경없음")
+    skipped = sum(1 for l in logs if l.status.startswith("건너뜀"))
+    errors = sum(1 for l in logs if l.status == "오류")
+    warnings = sum(1 for l in logs if l.status == "경고")
+
+    print(f"완료: 결과 파일 -> {out_path}")
+    print(f"      로그 파일 -> {log_path}")
+    print(f"      신규기록 {written}건 / 변경(재측정) {changed}건 / 동일값 {unchanged}건 / "
+          f"건너뜀 {skipped}건 / 오류 {errors}건 / 경고 {warnings}건")
+    if errors:
+        print("오류가 발생했습니다. 로그 파일의 '요약' 시트를 확인하세요.")
+
+
+def run_generate(args):
     root = Path(args.root)
     template_path = Path(args.template)
 
@@ -320,35 +484,56 @@ def main():
     if not template_path.is_file():
         sys.exit(f"오류: 템플릿 파일을 찾을 수 없습니다: {template_path}")
 
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    if args.out:
-        out_path = Path(args.out)
-    else:
-        out_path = template_path.with_name(f"{template_path.stem}_결과_{timestamp}{template_path.suffix}")
-
-    if args.log:
-        log_path = Path(args.log)
-    else:
-        log_path = out_path.with_name(f"{out_path.stem}_로그.xlsx")
+    out_path, log_path = resolve_out_and_log_paths(template_path, args.out, args.log, "결과")
 
     # 템플릿은 절대 직접 열어서 쓰지 않고, 항상 먼저 새 경로로 복사한 뒤 그 사본을 채운다.
     shutil.copy2(template_path, out_path)
 
     logs = process(root, out_path, out_path)
-
     write_log(logs, log_path)
+    print_summary(logs, out_path, log_path)
 
-    written = sum(1 for l in logs if l.status == "기록완료")
-    skipped = sum(1 for l in logs if l.status == "건너뜀")
-    errors = sum(1 for l in logs if l.status == "오류")
-    warnings = sum(1 for l in logs if l.status == "경고")
 
-    print(f"완료: 결과 파일 -> {out_path}")
-    print(f"      로그 파일 -> {log_path}")
-    print(f"      기록 {written}건 / Invalid 건너뜀 {skipped}건 / 오류 {errors}건 / 경고 {warnings}건")
-    if errors:
-        print("오류가 발생했습니다. 로그 파일의 '요약' 시트를 확인하세요.")
+def run_update(args):
+    existing_path = Path(args.existing)
+    retest_root = Path(args.retest_root)
+
+    if not existing_path.is_file():
+        sys.exit(f"오류: 기존 결과 파일을 찾을 수 없습니다: {existing_path}")
+    if not retest_root.is_dir():
+        sys.exit(f"오류: 재측정 폴더를 찾을 수 없습니다: {retest_root}")
+
+    out_path, log_path = resolve_out_and_log_paths(existing_path, args.out, args.log, "재측정반영")
+
+    # 기존 결과 파일도 직접 수정하지 않고, 새 경로로 복사한 뒤 그 사본에 반영한다.
+    shutil.copy2(existing_path, out_path)
+
+    logs = update_with_retest(out_path, retest_root, out_path)
+    write_log(logs, log_path)
+    print_summary(logs, out_path, log_path)
+
+
+def main():
+    parser = argparse.ArgumentParser(description="LoD FinalResult 데이터를 타겟 엑셀로 자동 집계")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+
+    gen = subparsers.add_parser("generate", help="1st 폴더 전체를 훑어 빈 템플릿에서 새 결과 파일 생성")
+    gen.add_argument("--root", required=True, help="1st 폴더 경로 (상위 폴더 5000cp 등이 들어있는 경로)")
+    gen.add_argument("--template", required=True, help="타겟 LoD 템플릿 xlsx 경로 (읽기 전용, 수정되지 않음)")
+    gen.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 템플릿명_결과_타임스탬프.xlsx)")
+    gen.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    gen.set_defaults(func=run_generate)
+
+    upd = subparsers.add_parser("update", help="재측정 폴더의 값으로 기존 결과 파일을 업데이트 (바뀐 셀만 노란색 표시)")
+    upd.add_argument("--existing", required=True, help="이전에 이 스크립트가 만든 결과 파일 경로 (읽기 전용, 수정되지 않음)")
+    upd.add_argument("--retest-root", required=True,
+                      help="재측정 raw 데이터 폴더 경로 (5000cp/N_1/FinalResult 같은 동일 구조, 재측정분만 있으면 됨)")
+    upd.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 기존파일명_재측정반영_타임스탬프.xlsx)")
+    upd.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    upd.set_defaults(func=run_update)
+
+    args = parser.parse_args()
+    args.func(args)
 
 
 if __name__ == "__main__":
