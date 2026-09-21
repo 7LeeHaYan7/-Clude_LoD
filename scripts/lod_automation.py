@@ -152,6 +152,25 @@ def find_final_result_files(sub_dir: Path) -> list[Path]:
     )
 
 
+def find_subfolders(top_dir: Path, n: int) -> list[Path]:
+    """폴더명이 정확히 'N_1'이거나 끝이 'N_1'로 끝나는 폴더를 찾는다.
+    (예: 'BBB014_..._5000cp-15_1' 도 n=15 대상으로 매칭됨)
+    11_1이 n=1의 '1_1'과 잘못 매칭되지 않도록, 숫자 앞 글자가 숫자면 제외한다."""
+    suffix = f"{n}_1"
+    matches = []
+    for d in sorted(top_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        if d.name == suffix:
+            matches.append(d)
+            continue
+        if d.name.endswith(suffix):
+            boundary_idx = len(d.name) - len(suffix)
+            if boundary_idx == 0 or not d.name[boundary_idx - 1].isdigit():
+                matches.append(d)
+    return matches
+
+
 def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
     logs: list[LogRow] = []
 
@@ -167,12 +186,18 @@ def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
 
         for n in range(1, SUBFOLDER_COUNT + 1):
             sub_name = f"{n}_1"
-            sub_dir = top_dir / sub_name
             target_row = FIRST_DATA_ROW + (n - 1)
 
-            if not sub_dir.is_dir():
+            sub_dirs = find_subfolders(top_dir, n)
+            if len(sub_dirs) == 0:
                 logs.append(LogRow(top, sub_name, status="오류", message="하위 폴더를 찾을 수 없음"))
                 continue
+            if len(sub_dirs) > 1:
+                names = ", ".join(d.name for d in sub_dirs)
+                logs.append(LogRow(top, sub_name, status="오류",
+                                    message=f"'{sub_name}'로 끝나는 하위 폴더가 {len(sub_dirs)}개 발견됨: {names}"))
+                continue
+            sub_dir = sub_dirs[0]
 
             matches = find_final_result_files(sub_dir)
             if len(matches) == 0:
