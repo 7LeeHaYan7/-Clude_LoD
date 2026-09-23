@@ -23,17 +23,30 @@ import argparse
 import re
 import shutil
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
 import openpyxl
 from openpyxl.styles import PatternFill
+from openpyxl.drawing.image import Image as XLImage
 
 try:
     import xlrd
 except ImportError:  # pragma: no cover
     xlrd = None
+
+try:
+    import numpy as np
+    import statsmodels.api as sm
+    from scipy.stats import norm
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    PROBIT_LIBS_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    PROBIT_LIBS_AVAILABLE = False
 
 
 TOP_FOLDERS_ORDER = ["5000cp", "1670cp", "556cp", "185cp", "62cp", "21cp"]
@@ -67,6 +80,14 @@ SLOPE_CELL = "AB18"
 INTERCEPT_CELL = "AB19"
 REGRESSION_Y_RANGE = "R6:R11"  # 평균 Ct
 REGRESSION_X_RANGE = "Q6:Q11"  # Log(농도)
+
+# LoD(Probit) 결과 입력 셀: AA22=LoD LogX, AA23=95% CI 하한 LogX, AA24=95% CI 상한 LogX
+LOD_LOGX_CELL = "AA22"
+LOD_CI_LOW_CELL = "AA23"
+LOD_CI_HIGH_CELL = "AA24"
+LOD_TARGET_P = 0.95
+LOD_PLOT_ANCHOR = "N40"
+LAST_DATA_ROW = FIRST_DATA_ROW + SUBFOLDER_COUNT - 1  # 21
 
 RETEST_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
@@ -207,6 +228,174 @@ def write_slope_intercept_formulas(wb: openpyxl.Workbook, logs: list[LogRow]):
                             status="수식입력", message=f"상수=INTERCEPT({REGRESSION_Y_RANGE},{REGRESSION_X_RANGE})"))
 
 
+def parse_conc_value(top_folder_name: str) -> float:
+    """'556cp' -> 556.0 처럼 상위 폴더명에서 숫자 농도값을 뽑는다."""
+    return float(top_folder_name.replace("cp", ""))
+
+
+def read_detection_counts(ws) -> list[tuple[float, int, int]]:
+    """이미 채워진 병원체 시트의 Ct 열(D6:D21 등)에서 농도별 (농도, 양성수, 시도수)를 구한다.
+    숫자 값이 있으면 양성(검출), 'UD' 텍스트면 음성, 빈칸이면 그 폴더는 아예 제외(시도수에서도 제외) -
+    타겟 시트의 Detect/Detect(%) 행(37~38)과 동일한 로직이다."""
+    result = []
+    for top in TOP_FOLDERS_ORDER:
+        conc = parse_conc_value(top)
+        col = CT_COLUMN[top]
+        positive = 0
+        total = 0
+        for row in range(FIRST_DATA_ROW, LAST_DATA_ROW + 1):
+            val = ws[f"{col}{row}"].value
+            if val is None or (isinstance(val, str) and val.strip() == ""):
+                continue
+            total += 1
+            if isinstance(val, (int, float)):
+                positive += 1
+        result.append((conc, positive, total))
+    return result
+
+
+def fit_probit_lod(points: list[tuple[float, int, int]], p: float = LOD_TARGET_P) -> dict:
+    """positive ~ log10(conc) 에 대한 probit GLM을 적합하고, MASS::dose.p와 동일한 델타법으로
+    p(기본 0.95) 지점의 LogX 추정치와 95% 신뢰구간(하한/상한)을 구한다."""
+    pts = [(c, pos, tot) for c, pos, tot in points if tot > 0]
+    if len(pts) < 3:
+        raise ValueError(f"유효한 농도 그룹이 {len(pts)}개뿐이라 probit 회귀를 할 수 없음(최소 3개 필요)")
+
+    conc = np.array([c for c, _, _ in pts], dtype=float)
+    positive = np.array([pos for _, pos, _ in pts], dtype=float)
+    total = np.array([tot for _, _, tot in pts], dtype=float)
+    log_conc = np.log10(conc)
+
+    X = sm.add_constant(log_conc)
+    endog = np.column_stack([positive, total - positive])
+    model = sm.GLM(endog, X, family=sm.families.Binomial(link=sm.families.links.Probit()))
+    fit_result = model.fit()
+    b0, b1 = fit_result.params
+    cov = fit_result.cov_params()
+    var_b0, var_b1, cov01 = cov[0, 0], cov[1, 1], cov[0, 1]
+
+    def dose_p(prob: float) -> tuple[float, float]:
+        z = norm.ppf(prob)
+        xp = (z - b0) / b1
+        se = np.sqrt((var_b0 + xp ** 2 * var_b1 + 2 * xp * cov01) / b1 ** 2)
+        return xp, se
+
+    xp, se = dose_p(p)
+    z975 = norm.ppf(0.975)
+
+    return {
+        "b0": b0, "b1": b1,
+        "dose_p": dose_p,
+        "lod_log": xp,
+        "ci_low_log": xp - z975 * se,
+        "ci_high_log": xp + z975 * se,
+        "points_log": [(np.log10(c), pos / tot) for c, pos, tot in pts],
+    }
+
+
+def generate_probit_plot(pathogen: str, fit: dict, out_png_path: Path):
+    """R 스크립트와 동일한 스타일(빨간 S커브, 95%선, LoD/CI 수직선, 신뢰구간 밴드)로 플롯을 그린다."""
+    b0, b1 = fit["b0"], fit["b1"]
+    dose_p = fit["dose_p"]
+    lod_log, ci_low, ci_high = fit["lod_log"], fit["ci_low_log"], fit["ci_high_log"]
+    z975 = norm.ppf(0.975)
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    x = np.linspace(-1, 4, 400)
+    ax.plot(x, norm.cdf(b0 + b1 * x), color="red", linewidth=1.2)
+
+    for log_conc, prop in fit["points_log"]:
+        ax.plot(log_conc, prop, "o", color="red", markersize=5)
+
+    ax.axhline(LOD_TARGET_P, linestyle="--", color="black", linewidth=0.8)
+    ax.axvline(lod_log, linestyle="--", color="black", linewidth=0.8)
+    ax.axvline(ci_low, linestyle=":", color="gray", linewidth=0.8)
+    ax.axvline(ci_high, linestyle=":", color="gray", linewidth=0.8)
+    ax.plot(lod_log, LOD_TARGET_P, "s", color="blue", markersize=6)
+
+    ax.text(0, LOD_TARGET_P - 0.02, "95%", fontsize=8)
+    ax.text(ci_low, 0.01, f"{ci_low:.2f}", fontsize=8, ha="left")
+    ax.text(lod_log, 0.01, f"{lod_log:.2f}", fontsize=8, ha="left")
+    ax.text(ci_high, 0.01, f"{ci_high:.2f}", fontsize=8, ha="left")
+
+    band_x_low, band_y_low, band_x_high, band_y_high = [], [], [], []
+    for prob in np.arange(0.001, 0.999, 0.005):
+        xp, se = dose_p(prob)
+        band_x_low.append(xp - z975 * se)
+        band_y_low.append(prob)
+        band_x_high.append(xp + z975 * se)
+        band_y_high.append(prob)
+    ax.plot(band_x_low, band_y_low, ".", color="red", markersize=1)
+    ax.plot(band_x_high, band_y_high, ".", color="red", markersize=1)
+
+    ax.set_xlim(-1, 4)
+    ax.set_ylim(0, 1.02)
+    ax.set_xlabel("log(concentration) (copies/test)")
+    ax.set_ylabel("proportion")
+    ax.set_title(f"IRON-qPCR_{pathogen}_LoD")
+
+    fig.tight_layout()
+    fig.savefig(out_png_path, dpi=120)
+    plt.close(fig)
+
+
+def embed_plot_image(ws, png_path: Path, anchor_cell: str):
+    """이전에 이 스크립트가 넣은 이미지를 지우고 새 이미지를 anchor_cell 위치에 삽입한다."""
+    ws._images = []
+    img = XLImage(str(png_path))
+    img.anchor = anchor_cell
+    ws.add_image(img)
+
+
+def write_probit_lod(wb: openpyxl.Workbook, logs: list[LogRow]) -> Path | None:
+    """각 병원체 시트의 Ct 데이터로 probit LoD를 구해 AA22~24에 쓰고, 그래프를 삽입한다."""
+    if not PROBIT_LIBS_AVAILABLE:
+        logs.append(LogRow("", "", status="오류",
+                            message="probit 계산에 필요한 패키지(statsmodels/scipy/matplotlib)가 설치되지 않음 "
+                                    "- pip install -r requirements.txt 로 설치 필요"))
+        return None
+
+    tmp_dir = Path(tempfile.mkdtemp(prefix="lod_probit_"))
+
+    for pathogen in PATHOGENS:
+        sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
+        if sheet_name not in wb.sheetnames:
+            logs.append(LogRow("", "", target_sheet=sheet_name, status="오류",
+                                message="LoD(Probit) 입력 대상 시트 없음"))
+            continue
+        ws = wb[sheet_name]
+
+        points = read_detection_counts(ws)
+        try:
+            fit = fit_probit_lod(points)
+        except Exception as e:
+            logs.append(LogRow("", "", target_sheet=sheet_name, status="오류",
+                                message=f"probit 회귀 실패: {e}"))
+            continue
+
+        ws[LOD_LOGX_CELL] = round(fit["lod_log"], 4)
+        ws[LOD_CI_LOW_CELL] = round(fit["ci_low_log"], 4)
+        ws[LOD_CI_HIGH_CELL] = round(fit["ci_high_log"], 4)
+        logs.append(LogRow(
+            "", "", target_sheet=sheet_name, target_cell=LOD_LOGX_CELL,
+            written_value=round(fit["lod_log"], 4), status="LoD계산",
+            message=f"LogX(LoD)={fit['lod_log']:.4f}, CI=[{fit['ci_low_log']:.4f}, {fit['ci_high_log']:.4f}]",
+        ))
+
+        png_path = tmp_dir / f"{pathogen}_lod.png"
+        try:
+            generate_probit_plot(pathogen, fit, png_path)
+            embed_plot_image(ws, png_path, LOD_PLOT_ANCHOR)
+            logs.append(LogRow("", "", target_sheet=sheet_name, target_cell=LOD_PLOT_ANCHOR,
+                                status="그래프삽입"))
+        except Exception as e:
+            logs.append(LogRow("", "", target_sheet=sheet_name, status="오류",
+                                message=f"그래프 생성/삽입 실패: {e}"))
+
+    return tmp_dir
+
+
 def check_all_rows_valid(src: SourceWorkbook) -> tuple[bool, dict[int, str]]:
     """B18~B21을 모두 확인한다. 넷 다 'Valid'여야 이 폴더 전체를 사용할 수 있다.
     하나라도 Invalid(또는 그 외 값)면 그 폴더는 모든 시트에서 통째로 제외된다."""
@@ -305,8 +494,11 @@ def process(root: Path, template_path: Path, out_path: Path) -> list[LogRow]:
             src.close()
 
     write_slope_intercept_formulas(wb, logs)
+    tmp_dir = write_probit_lod(wb, logs)
 
     wb.save(out_path)
+    if tmp_dir is not None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return logs
 
 
@@ -403,8 +595,11 @@ def update_with_retest(existing_path: Path, retest_root: Path, out_path: Path) -
             src.close()
 
     write_slope_intercept_formulas(wb, logs)
+    tmp_dir = write_probit_lod(wb, logs)
 
     wb.save(out_path)
+    if tmp_dir is not None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
     return logs
 
 
