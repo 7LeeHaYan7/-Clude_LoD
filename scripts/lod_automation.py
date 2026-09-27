@@ -235,8 +235,10 @@ def parse_conc_value(top_folder_name: str) -> float:
 
 def read_detection_counts(ws) -> list[tuple[float, int, int]]:
     """이미 채워진 병원체 시트의 Ct 열(D6:D21 등)에서 농도별 (농도, 양성수, 시도수)를 구한다.
-    숫자 값이 있으면 양성(검출), 'UD' 텍스트면 음성, 빈칸이면 그 폴더는 아예 제외(시도수에서도 제외) -
-    타겟 시트의 Detect/Detect(%) 행(37~38)과 동일한 로직이다."""
+    빈칸이면 그 폴더는 아예 제외(시도수에서도 제외). 그 외에는 'UD'라는 글자가 포함된 값만 음성으로
+    치고 나머지는 전부 양성으로 센다 - 타겟 시트의 Detect 수식(COUNTA - COUNTIF("*UD*"))과 정확히
+    동일한 기준이다. (숫자 타입인지 여부로 판정하면 "28..35"처럼 오타로 텍스트가 된 Ct 값이 음성으로
+    잘못 빠지는 문제가 있어, 엑셀 수식과 동일하게 'UD' 포함 여부만으로 판정한다.)"""
     result = []
     for top in TOP_FOLDERS_ORDER:
         conc = parse_conc_value(top)
@@ -248,8 +250,9 @@ def read_detection_counts(ws) -> list[tuple[float, int, int]]:
             if val is None or (isinstance(val, str) and val.strip() == ""):
                 continue
             total += 1
-            if isinstance(val, (int, float)):
-                positive += 1
+            if isinstance(val, str) and "ud" in val.lower():
+                continue
+            positive += 1
         result.append((conc, positive, total))
     return result
 
