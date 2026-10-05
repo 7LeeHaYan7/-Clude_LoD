@@ -8,6 +8,7 @@ LoD 실험 데이터 자동 집계 스크립트
   <ROOT>/185cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/62cp/1_1 .. 16_1/*FinalResult*.xls(x)
   <ROOT>/21cp/1_1 .. 16_1/*FinalResult*.xls(x)
+  <ROOT>/7cp/1_1 .. 16_1/*FinalResult*.xls(x)
 
 각 FinalResult 파일의 B18~B21 값을 확인하여 Valid인 행에서 지정된 셀을
 읽어 타겟 LoD 템플릿(xlsx)의 해당 병원체 시트, 해당 행/열에 기록한다.
@@ -49,7 +50,7 @@ except ImportError:  # pragma: no cover
     PROBIT_LIBS_AVAILABLE = False
 
 
-TOP_FOLDERS_ORDER = ["5000cp", "1670cp", "556cp", "185cp", "62cp", "21cp"]
+TOP_FOLDERS_ORDER = ["5000cp", "1670cp", "556cp", "185cp", "62cp", "21cp", "7cp"]
 
 # 상위 폴더 -> 타겟 시트에서 Ct 값을 쓸 열
 CT_COLUMN = {
@@ -59,6 +60,7 @@ CT_COLUMN = {
     "185cp": "J",
     "62cp": "L",
     "21cp": "N",
+    "7cp": "P",
 }
 
 SUBFOLDER_COUNT = 16  # 1_1 ~ 16_1
@@ -78,8 +80,8 @@ PATHOGENS = ["CPA", "CPE", "Giardia", "CPV2", "Campylobacter", "Salmonella", "CE
 # 기울기/상수: 각 병원체 시트의 표준곡선(Log(농도) vs 평균 Ct) 선형회귀
 SLOPE_CELL = "AB18"
 INTERCEPT_CELL = "AB19"
-REGRESSION_Y_RANGE = "R6:R11"  # 평균 Ct
-REGRESSION_X_RANGE = "Q6:Q11"  # Log(농도)
+REGRESSION_Y_RANGE = "R6:R12"  # 평균 Ct
+REGRESSION_X_RANGE = "Q6:Q12"  # Log(농도)
 
 # LoD(Probit) 결과 입력 셀: AA22=LoD LogX, AA23=95% CI 하한 LogX, AA24=95% CI 상한 LogX
 LOD_LOGX_CELL = "AA22"
@@ -516,7 +518,7 @@ def update_with_retest(existing_path: Path, retest_root: Path, out_path: Path) -
         top = top_dir.name
         if top not in CT_COLUMN:
             logs.append(LogRow(top, "", status="오류",
-                                message="알 수 없는 상위 폴더명 (5000cp/1670cp/556cp/185cp/62cp/21cp 중 하나여야 함)"))
+                                message="알 수 없는 상위 폴더명 (5000cp/1670cp/556cp/185cp/62cp/21cp/7cp 중 하나여야 함)"))
             continue
         ct_col = CT_COLUMN[top]
 
