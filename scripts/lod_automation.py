@@ -74,7 +74,7 @@ EXTRACTION_RULES: list[tuple[int, list[tuple[str, str]]]] = [
     (21, [("C", "CECoV")]),
 ]
 
-TARGET_SHEET_PREFIX = "260909_"
+TARGET_SHEET_PREFIX = ""
 PATHOGENS = ["CPA", "CPE", "Giardia", "CPV2", "Campylobacter", "Salmonella", "CECoV"]
 
 # 기울기/상수: 각 병원체 시트의 표준곡선(Log(농도) vs 평균 Ct) 선형회귀
