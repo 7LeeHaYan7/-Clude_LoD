@@ -78,17 +78,17 @@ TARGET_SHEET_PREFIX = "260909_"
 PATHOGENS = ["CPA", "CPE", "Giardia", "CPV2", "Campylobacter", "Salmonella", "CECoV"]
 
 # 기울기/상수: 각 병원체 시트의 표준곡선(Log(농도) vs 평균 Ct) 선형회귀
-SLOPE_CELL = "AB18"
-INTERCEPT_CELL = "AB19"
-REGRESSION_Y_RANGE = "R6:R12"  # 평균 Ct
-REGRESSION_X_RANGE = "Q6:Q12"  # Log(농도)
+SLOPE_CELL = "AD18"
+INTERCEPT_CELL = "AD19"
+REGRESSION_Y_RANGE = "T6:T12"  # 평균 Ct
+REGRESSION_X_RANGE = "S6:S12"  # Log(농도)
 
-# LoD(Probit) 결과 입력 셀: AA22=LoD LogX, AA23=95% CI 하한 LogX, AA24=95% CI 상한 LogX
-LOD_LOGX_CELL = "AA22"
-LOD_CI_LOW_CELL = "AA23"
-LOD_CI_HIGH_CELL = "AA24"
+# LoD(Probit) 결과 입력 셀: AC22=LoD LogX, AC23=95% CI 하한 LogX, AC24=95% CI 상한 LogX
+LOD_LOGX_CELL = "AC22"
+LOD_CI_LOW_CELL = "AC23"
+LOD_CI_HIGH_CELL = "AC24"
 LOD_TARGET_P = 0.95
-LOD_PLOT_ANCHOR = "N40"
+LOD_PLOT_ANCHOR = "R40"
 LAST_DATA_ROW = FIRST_DATA_ROW + SUBFOLDER_COUNT - 1  # 21
 
 RETEST_FILL = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -214,7 +214,7 @@ def parse_folder_number(name: str) -> int | None:
 
 
 def write_slope_intercept_formulas(wb: openpyxl.Workbook, logs: list[LogRow]):
-    """각 병원체 시트에 표준곡선 기울기(AB18)/상수(AB19) 수식을 입력한다."""
+    """각 병원체 시트에 표준곡선 기울기(AD18)/상수(AD19) 수식을 입력한다."""
     for pathogen in PATHOGENS:
         sheet_name = f"{TARGET_SHEET_PREFIX}{pathogen}"
         if sheet_name not in wb.sheetnames:
@@ -354,7 +354,7 @@ def embed_plot_image(ws, png_path: Path, anchor_cell: str):
 
 
 def write_probit_lod(wb: openpyxl.Workbook, logs: list[LogRow]) -> Path | None:
-    """각 병원체 시트의 Ct 데이터로 probit LoD를 구해 AA22~24에 쓰고, 그래프를 삽입한다."""
+    """각 병원체 시트의 Ct 데이터로 probit LoD를 구해 AC22~24에 쓰고, 그래프를 삽입한다."""
     if not PROBIT_LIBS_AVAILABLE:
         logs.append(LogRow("", "", status="오류",
                             message="probit 계산에 필요한 패키지(statsmodels/scipy/matplotlib)가 설치되지 않음 "
