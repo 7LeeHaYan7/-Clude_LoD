@@ -299,42 +299,50 @@ def fit_probit_lod(points: list[tuple[float, int, int]], p: float = LOD_TARGET_P
 
 
 def generate_probit_plot(pathogen: str, fit: dict, out_png_path: Path):
-    """R 스크립트와 동일한 스타일(빨간 S커브, 95%선, LoD/CI 수직선, 신뢰구간 밴드)로 플롯을 그린다."""
+    """R 스크립트와 동일한 스타일(빨간 S커브, 95%선, LoD/CI 수직선, 신뢰구간 밴드)로 플롯을 그린다.
+    모든 농도에서 100% 검출되는 등 완전분리(perfect separation)가 일어나면 LoD/CI가 수학적으로
+    발산해 천문학적 숫자가 나올 수 있다 - 그 값을 그대로 그리면 matplotlib이 좌표 변환에서 죽으므로,
+    선/점/글자 위치는 그래프 범위(X_MIN~X_MAX) 안으로 고정해서 그린다. 발산 여부와 무관하게 실제
+    계산값은 그대로 AC22~24 셀에 기록되며, 이 함수는 시각화만 담당한다."""
+    X_MIN, X_MAX = -1, 4
     b0, b1 = fit["b0"], fit["b1"]
     dose_p = fit["dose_p"]
     lod_log, ci_low, ci_high = fit["lod_log"], fit["ci_low_log"], fit["ci_high_log"]
+    lod_log_plot = float(np.clip(lod_log, X_MIN, X_MAX))
+    ci_low_plot = float(np.clip(ci_low, X_MIN, X_MAX))
+    ci_high_plot = float(np.clip(ci_high, X_MIN, X_MAX))
     z975 = norm.ppf(0.975)
 
     fig, ax = plt.subplots(figsize=(7, 5))
 
-    x = np.linspace(-1, 4, 400)
+    x = np.linspace(X_MIN, X_MAX, 400)
     ax.plot(x, norm.cdf(b0 + b1 * x), color="red", linewidth=1.2)
 
     for log_conc, prop in fit["points_log"]:
         ax.plot(log_conc, prop, "o", color="red", markersize=5)
 
     ax.axhline(LOD_TARGET_P, linestyle="--", color="black", linewidth=0.8)
-    ax.axvline(lod_log, linestyle="--", color="black", linewidth=0.8)
-    ax.axvline(ci_low, linestyle=":", color="gray", linewidth=0.8)
-    ax.axvline(ci_high, linestyle=":", color="gray", linewidth=0.8)
-    ax.plot(lod_log, LOD_TARGET_P, "s", color="blue", markersize=6)
+    ax.axvline(lod_log_plot, linestyle="--", color="black", linewidth=0.8)
+    ax.axvline(ci_low_plot, linestyle=":", color="gray", linewidth=0.8)
+    ax.axvline(ci_high_plot, linestyle=":", color="gray", linewidth=0.8)
+    ax.plot(lod_log_plot, LOD_TARGET_P, "s", color="blue", markersize=6)
 
     ax.text(0, LOD_TARGET_P - 0.02, "95%", fontsize=8)
-    ax.text(ci_low, 0.01, f"{ci_low:.2f}", fontsize=8, ha="left")
-    ax.text(lod_log, 0.01, f"{lod_log:.2f}", fontsize=8, ha="left")
-    ax.text(ci_high, 0.01, f"{ci_high:.2f}", fontsize=8, ha="left")
+    ax.text(ci_low_plot, 0.01, f"{ci_low:.2f}", fontsize=8, ha="left")
+    ax.text(lod_log_plot, 0.01, f"{lod_log:.2f}", fontsize=8, ha="left")
+    ax.text(ci_high_plot, 0.01, f"{ci_high:.2f}", fontsize=8, ha="left")
 
     band_x_low, band_y_low, band_x_high, band_y_high = [], [], [], []
     for prob in np.arange(0.001, 0.999, 0.005):
         xp, se = dose_p(prob)
-        band_x_low.append(xp - z975 * se)
+        band_x_low.append(float(np.clip(xp - z975 * se, X_MIN, X_MAX)))
         band_y_low.append(prob)
-        band_x_high.append(xp + z975 * se)
+        band_x_high.append(float(np.clip(xp + z975 * se, X_MIN, X_MAX)))
         band_y_high.append(prob)
     ax.plot(band_x_low, band_y_low, ".", color="red", markersize=1)
     ax.plot(band_x_high, band_y_high, ".", color="red", markersize=1)
 
-    ax.set_xlim(-1, 4)
+    ax.set_xlim(X_MIN, X_MAX)
     ax.set_ylim(0, 1.02)
     ax.set_xlabel("log(concentration) (copies/test)")
     ax.set_ylabel("proportion")
@@ -681,7 +689,17 @@ def print_summary(logs: list[LogRow], out_path: Path, log_path: Path):
         print("오류가 발생했습니다. 로그 파일의 '요약' 시트를 확인하세요.")
 
 
+def apply_subfolder_count(n: int):
+    """농도당 반복(하위 폴더) 개수를 n으로 덮어쓴다. 데이터 입력 마지막 행(LAST_DATA_ROW)도
+    같이 재계산된다. (기울기/상수/LoD 셀, 회귀범위, 그래프 위치는 고정된 절대 셀이라 영향 없음)"""
+    global SUBFOLDER_COUNT, LAST_DATA_ROW
+    SUBFOLDER_COUNT = n
+    LAST_DATA_ROW = FIRST_DATA_ROW + SUBFOLDER_COUNT - 1
+
+
 def run_generate(args):
+    apply_subfolder_count(args.subfolder_count)
+
     root = Path(args.root)
     template_path = Path(args.template)
 
@@ -717,6 +735,8 @@ def recalc_slope_and_lod(input_path: Path, out_path: Path) -> list[LogRow]:
 
 
 def run_update(args):
+    apply_subfolder_count(args.subfolder_count)
+
     existing_path = Path(args.existing)
     retest_root = Path(args.retest_root)
 
@@ -736,6 +756,8 @@ def run_update(args):
 
 
 def run_recalc(args):
+    apply_subfolder_count(args.subfolder_count)
+
     input_path = Path(args.input)
 
     if not input_path.is_file():
@@ -760,6 +782,9 @@ def main():
     gen.add_argument("--template", required=True, help="타겟 LoD 템플릿 xlsx 경로 (읽기 전용, 수정되지 않음)")
     gen.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 템플릿명_결과_타임스탬프.xlsx)")
     gen.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    gen.add_argument("--subfolder-count", type=int, default=SUBFOLDER_COUNT,
+                      help=f"농도당 하위 폴더(반복) 개수 (기본 {SUBFOLDER_COUNT}). 늘리면 데이터 입력 행이 "
+                           "그만큼 아래로 늘어남 (기울기/상수/LoD 셀, 그래프 위치는 영향 없음)")
     gen.set_defaults(func=run_generate)
 
     upd = subparsers.add_parser("update", help="재측정 폴더의 값으로 기존 결과 파일을 업데이트 (바뀐 셀만 노란색 표시)")
@@ -768,12 +793,18 @@ def main():
                       help="재측정 raw 데이터 폴더 경로 (5000cp/N_1/FinalResult 같은 동일 구조, 재측정분만 있으면 됨)")
     upd.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 기존파일명_재측정반영_타임스탬프.xlsx)")
     upd.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    upd.add_argument("--subfolder-count", type=int, default=SUBFOLDER_COUNT,
+                      help=f"농도당 하위 폴더(반복) 개수 (기본 {SUBFOLDER_COUNT}). 기존 결과 파일을 만들 때와 "
+                           "동일한 값을 지정해야 함")
     upd.set_defaults(func=run_update)
 
     rec = subparsers.add_parser("recalc", help="Ct 데이터가 이미 채워진 결과 파일에서 기울기/상수/LoD(그래프 포함)만 다시 계산")
     rec.add_argument("--input", required=True, help="Ct 데이터가 채워진 기존 결과 파일 경로 (읽기 전용, 수정되지 않음)")
     rec.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 입력파일명_재계산_타임스탬프.xlsx)")
     rec.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    rec.add_argument("--subfolder-count", type=int, default=SUBFOLDER_COUNT,
+                      help=f"입력 파일의 농도당 반복(데이터 행) 개수 (기본 {SUBFOLDER_COUNT}). 실제 파일의 "
+                           "데이터 행 수와 맞아야 Detect 계산 범위가 정확함")
     rec.set_defaults(func=run_recalc)
 
     args = parser.parse_args()
