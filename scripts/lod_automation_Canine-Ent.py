@@ -700,6 +700,22 @@ def run_generate(args):
     print_summary(logs, out_path, log_path)
 
 
+def recalc_slope_and_lod(input_path: Path, out_path: Path) -> list[LogRow]:
+    """Ct 데이터가 이미 채워진 결과 파일을 열어 기울기/상수(AD18/AD19)와 LoD(AC22~24, 그래프)만
+    다시 계산한다. Ct 값 자체나 다른 셀은 전혀 건드리지 않는다."""
+    logs: list[LogRow] = []
+
+    wb = openpyxl.load_workbook(input_path)
+
+    write_slope_intercept_formulas(wb, logs)
+    tmp_dir = write_probit_lod(wb, logs)
+
+    wb.save(out_path)
+    if tmp_dir is not None:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return logs
+
+
 def run_update(args):
     existing_path = Path(args.existing)
     retest_root = Path(args.retest_root)
@@ -715,6 +731,22 @@ def run_update(args):
     shutil.copy2(existing_path, out_path)
 
     logs = update_with_retest(out_path, retest_root, out_path)
+    write_log(logs, log_path)
+    print_summary(logs, out_path, log_path)
+
+
+def run_recalc(args):
+    input_path = Path(args.input)
+
+    if not input_path.is_file():
+        sys.exit(f"오류: 입력 파일을 찾을 수 없습니다: {input_path}")
+
+    out_path, log_path = resolve_out_and_log_paths(input_path, args.out, args.log, "재계산")
+
+    # 입력 파일도 직접 수정하지 않고, 새 경로로 복사한 뒤 그 사본에 반영한다.
+    shutil.copy2(input_path, out_path)
+
+    logs = recalc_slope_and_lod(out_path, out_path)
     write_log(logs, log_path)
     print_summary(logs, out_path, log_path)
 
@@ -737,6 +769,12 @@ def main():
     upd.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 기존파일명_재측정반영_타임스탬프.xlsx)")
     upd.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
     upd.set_defaults(func=run_update)
+
+    rec = subparsers.add_parser("recalc", help="Ct 데이터가 이미 채워진 결과 파일에서 기울기/상수/LoD(그래프 포함)만 다시 계산")
+    rec.add_argument("--input", required=True, help="Ct 데이터가 채워진 기존 결과 파일 경로 (읽기 전용, 수정되지 않음)")
+    rec.add_argument("--out", help="결과를 저장할 새 파일 경로 (기본: 입력파일명_재계산_타임스탬프.xlsx)")
+    rec.add_argument("--log", help="처리 로그를 저장할 경로 (기본: 결과파일명_로그.xlsx)")
+    rec.set_defaults(func=run_recalc)
 
     args = parser.parse_args()
     args.func(args)
