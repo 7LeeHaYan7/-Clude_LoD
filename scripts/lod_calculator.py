@@ -247,9 +247,11 @@ def load_target_config(path: Path) -> tuple[list[str], list[tuple[int, list[tupl
         if v is None:
             continue
         key = str(v).strip().lower()
-        if key == "target":
+        # 정확히 'target'/'data'가 아니어도 'Ct Data cell'처럼 단어가 포함돼 있으면 인정한다
+        # (실제 파일마다 헤더 문구가 조금씩 다른 경우가 있음).
+        if target_col is None and "target" in key:
             target_col = c
-        elif key == "data":
+        elif data_col is None and "data" in key:
             data_col = c
     if target_col is None or data_col is None:
         raise ValueError(
